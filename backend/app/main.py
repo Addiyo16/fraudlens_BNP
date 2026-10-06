@@ -1,23 +1,60 @@
 from datetime import datetime
 
 from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.db.database import engine, Base, get_db
 from app.db import models
 from app.db.crud import create_transaction
 
+from app.api import upload, flags, summary
 
+
+# Create database tables
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="FraudLens")
+
+app = FastAPI(
+    title="FraudLens API",
+    version="1.0.0"
+)
+
+
+# Allow React frontend to call the backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# FraudLens API routes
+app.include_router(upload.router)
+app.include_router(flags.router)
+app.include_router(summary.router)
 
 
 @app.get("/")
 def root():
-    return {"message": "FraudLens backend running"}
+    return {
+        "name": "FraudLens",
+        "status": "running"
+    }
 
 
+@app.get("/health")
+def health():
+    return {
+        "status": "ok"
+    }
+
+
+# Temporary database test endpoint from Dev 2
 @app.post("/test-transaction")
 def test_transaction(db: Session = Depends(get_db)):
 
