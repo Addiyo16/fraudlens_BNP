@@ -18,13 +18,31 @@ from .database import Base
 class Transaction(Base):
     __tablename__ = "transactions"
 
-    txn_id = Column(String, primary_key=True, index=True)
-    customer_id = Column(String, nullable=False, index=True)
+    # Fields from train.csv and test.csv
+    transaction_id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    timestamp = Column(Integer, nullable=False, index=True)
     amount = Column(Float, nullable=False)
-    timestamp = Column(DateTime, nullable=False, index=True)
-    city = Column(String, nullable=False)
-    beneficiary_id = Column(String, nullable=False)
-    channel = Column(String, nullable=False)
+    merchant_category = Column(Integer, nullable=False)
+    country = Column(Integer, nullable=False)
+    device_id = Column(Integer, nullable=False)
+    channel = Column(Integer, nullable=False)
+    hours_since_prev_txn = Column(Float, nullable=False)
+
+    # Present in train.csv; NULL for unlabelled test transactions
+    label = Column(Integer, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("amount >= 0", name="ck_transaction_amount"),
+        CheckConstraint(
+            "hours_since_prev_txn >= 0",
+            name="ck_transaction_previous_hours",
+        ),
+        CheckConstraint(
+            "label IS NULL OR label IN (0, 1)",
+            name="ck_transaction_label",
+        ),
+    )
 
     flags = relationship(
         "Flag",
@@ -54,9 +72,9 @@ class Flag(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
-    txn_id = Column(
-        String,
-        ForeignKey("transactions.txn_id", ondelete="CASCADE"),
+    transaction_id = Column(
+        Integer,
+        ForeignKey("transactions.transaction_id", ondelete="CASCADE"),
         nullable=False,
         unique=True,
         index=True,
@@ -100,6 +118,6 @@ class AnalystAction(Base):
 
     action = Column(String, nullable=False)
     notes = Column(Text, nullable=True)
-    timestamp = Column(DateTime, nullable=False, index=True)
+    timestamp = Column(DateTime, nullable=False)
 
     flag = relationship("Flag", back_populates="analyst_actions")
