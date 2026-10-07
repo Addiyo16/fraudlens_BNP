@@ -1,7 +1,33 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
 backend/.venv/
 .venv/
-__pycache__/
-*.pyc
-.pytest_cache/
-.env
+venv/
+env/
+
+# Local databases and backups
 *.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Raw datasets
+backend/data/data/fraud_model/*.csv
+backend/data/data/transactions.csv
+
+# Test and coverage files
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# IDE files
+.vscode/
+.idea/

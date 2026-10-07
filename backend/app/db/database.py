@@ -12,7 +12,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 #       database.py
 #     fraudlens.db
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
+BACKEND_DIR = Path(__file__).resolve().parents[2]
 DB_PATH = BACKEND_DIR / "fraudlens.db"
 
 DATABASE_URL = f"sqlite:///{DB_PATH.as_posix()}"

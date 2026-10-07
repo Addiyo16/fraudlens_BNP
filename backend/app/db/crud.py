@@ -1,41 +1,20 @@
-
 from datetime import datetime
-from typing import Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy import cast, desc, func, String
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app.db.models import Transaction, Flag, AnalystAction
 
 
-# --------------------------------------------------
-# CONSTANTS
-# --------------------------------------------------
-
-ALLOWED_ACTIONS = {"Fraud", "Genuine", "Escalate"}
-
-ALLOWED_STATUSES = {
-    "Pending",
-    "Fraud",
-    "Genuine",
-    "Escalate",
-}
-
-ALLOWED_RISK_LEVELS = {
-    "Low",
-    "Medium",
-    "High",
-}
-
-
-# --------------------------------------------------
-# TRANSACTION CRUD
-# --------------------------------------------------
+# ============================================================
+# TRANSACTIONS
+# ============================================================
 
 def create_transaction(db: Session, transaction_data: dict):
-    """Create a new transaction."""
+    """Create and persist a transaction."""
 
-    required_fields = [
+    allowed_fields = {
         "txn_id",
         "customer_id",
         "amount",
@@ -43,19 +22,40 @@ def create_transaction(db: Session, transaction_data: dict):
         "city",
         "beneficiary_id",
         "channel",
-    ]
+    }
 
-    for field in required_fields:
-        if field not in transaction_data:
-            raise ValueError(f"Missing required field: {field}")
+    data = {
+        key: value
+        for key, value in transaction_data.items()
+        if key in allowed_fields
+    }
 
-    if not isinstance(transaction_data["timestamp"], datetime):
-        raise ValueError("timestamp must be a datetime object")
+    required_fields = {
+        "txn_id",
+        "customer_id",
+        "amount",
+        "timestamp",
+        "city",
+        "beneficiary_id",
+        "channel",
+    }
 
-    if db.get(Transaction, transaction_data["txn_id"]) is not None:
-        raise ValueError("Transaction ID already exists")
+    missing = required_fields - data.keys()
 
-    transaction = Transaction(**transaction_data)
+    if missing:
+        raise ValueError(
+            f"Missing required transaction fields: {sorted(missing)}"
+        )
+
+    if get_transaction(db, data["txn_id"]) is not None:
+        raise ValueError(
+            f"Transaction {data['txn_id']} already exists."
+        )
+
+    if data["amount"] < 0:
+        raise ValueError("Transaction amount cannot be negative.")
+
+    transaction = Transaction(**data)
 
     try:
         db.add(transaction)
@@ -63,44 +63,61 @@ def create_transaction(db: Session, transaction_data: dict):
         db.refresh(transaction)
         return transaction
 
-    except IntegrityError as exc:
+    except IntegrityError:
         db.rollback()
         raise ValueError(
-            "Could not create transaction. Check the transaction ID and data."
-        ) from exc
+            "Could not create transaction due to duplicate or invalid data."
+        )
+
+    except Exception:
+        db.rollback()
+        raise
 
 
 def get_transaction(db: Session, txn_id: str):
-    """Get a transaction by its ID."""
+    return (
+        db.query(Transaction)
+        .filter(Transaction.txn_id == txn_id)
+        .first()
+    )
 
-    return db.get(Transaction, txn_id)
 
-
-def get_all_transactions(db: Session):
-    """Return all transactions in chronological order."""
-
+def get_all_transactions(db: Session, limit: int = 1000):
     return (
         db.query(Transaction)
         .order_by(Transaction.timestamp.desc())
+        .limit(limit)
         .all()
     )
 
 
-def get_transactions_by_customer(db: Session, customer_id: str):
-    """Return transactions belonging to one customer."""
+def get_customer_transactions(
+    db: Session,
+    customer_id: str,
+):
+    """
+    Return a customer's complete transaction history
+    in chronological order.
+    """
 
     return (
         db.query(Transaction)
         .filter(Transaction.customer_id == customer_id)
-        .order_by(Transaction.timestamp.desc())
+        .order_by(Transaction.timestamp.asc())
         .all()
     )
 
 
-def delete_transaction(db: Session, txn_id: str):
-    """Delete a transaction by its ID."""
+# Backward-compatible alias
+def get_transactions_by_customer(
+    db: Session,
+    customer_id: str,
+):
+    return get_customer_transactions(db, customer_id)
 
-    transaction = db.get(Transaction, txn_id)
+
+def delete_transaction(db: Session, txn_id: str):
+    transaction = get_transaction(db, txn_id)
 
     if transaction is None:
         return False
@@ -115,63 +132,64 @@ def delete_transaction(db: Session, txn_id: str):
         raise
 
 
-# --------------------------------------------------
-# FRAUD FLAG CRUD
-# --------------------------------------------------
+def get_total_transactions(db: Session):
+    return db.query(Transaction).count()
+
+
+# ============================================================
+# FRAUD FLAGS
+# ============================================================
 
 def create_flag(db: Session, flag_data: dict):
-    """Create a fraud flag for an existing transaction."""
+    """Create a fraud flag linked to an existing transaction."""
 
-    required_fields = [
-        "txn_id",
-        "risk_score",
-        "risk_level",
-        "triggered_rules",
-        "explanation",
-    ]
-
-    for field in required_fields:
-        if field not in flag_data:
-            raise ValueError(f"Missing required field: {field}")
-
-    txn_id = flag_data["txn_id"]
-
-    if db.get(Transaction, txn_id) is None:
-        raise ValueError("Transaction does not exist")
-
-    existing_flag = (
-        db.query(Flag)
-        .filter(Flag.txn_id == txn_id)
-        .first()
-    )
-
-    if existing_flag is not None:
-        raise ValueError("A flag already exists for this transaction")
-
-    risk_score = flag_data["risk_score"]
-
-    if (
-        isinstance(risk_score, bool)
-        or not isinstance(risk_score, int)
-        or not 0 <= risk_score <= 100
-    ):
-        raise ValueError("risk_score must be an integer between 0 and 100")
-
-    if flag_data["risk_level"] not in ALLOWED_RISK_LEVELS:
-        raise ValueError("Invalid risk level")
-
+    txn_id = flag_data.get("txn_id")
+    risk_score = flag_data.get("risk_score")
+    risk_level = flag_data.get("risk_level")
+    triggered_rules = flag_data.get("triggered_rules", [])
+    explanation = flag_data.get("explanation")
     status = flag_data.get("status", "Pending")
 
-    if status not in ALLOWED_STATUSES:
-        raise ValueError("Invalid flag status")
+    if get_transaction(db, txn_id) is None:
+        raise ValueError("Transaction does not exist.")
 
-    if not isinstance(flag_data["triggered_rules"], list):
-        raise ValueError("triggered_rules must be a list")
+    if get_flag_by_transaction(db, txn_id) is not None:
+        raise ValueError(
+            "A flag already exists for this transaction."
+        )
 
-    data = flag_data.copy()
-    data["status"] = status
+    if not isinstance(risk_score, int) or not 0 <= risk_score <= 100:
+        raise ValueError(
+            "risk_score must be an integer between 0 and 100."
+        )
 
-    flag = Flag(**data)
+    if risk_level not in {"Low", "Medium", "High"}:
+        raise ValueError("Invalid risk level.")
+
+    if status not in {
+        "Pending",
+        "Fraud",
+        "Genuine",
+        "Escalate",
+    }:
+        raise ValueError("Invalid flag status.")
+
+    if not isinstance(triggered_rules, list):
+        raise ValueError("triggered_rules must be a list.")
+
+    if not isinstance(explanation, str) or not explanation.strip():
+        raise ValueError(
+            "explanation must be a non-empty string."
+        )
+
+    flag = Flag(
+        txn_id=txn_id,
+        risk_score=risk_score,
+        risk_level=risk_level,
+        triggered_rules=triggered_rules,
+        explanation=explanation,
+        status=status,
+    )
 
     try:
         db.add(flag)
@@ -179,22 +197,26 @@ def create_flag(db: Session, flag_data: dict):
         db.refresh(flag)
         return flag
 
-    except IntegrityError as exc:
+    except IntegrityError:
         db.rollback()
         raise ValueError(
-            "Could not create flag. Verify the transaction and flag data."
-        ) from exc
+            "Could not create flag. Check for duplicate or invalid data."
+        )
+
+    except Exception:
+        db.rollback()
+        raise
 
 
 def get_flag(db: Session, flag_id: int):
-    """Get a flag by its database ID."""
-
-    return db.get(Flag, flag_id)
+    return (
+        db.query(Flag)
+        .filter(Flag.id == flag_id)
+        .first()
+    )
 
 
 def get_flag_by_transaction(db: Session, txn_id: str):
-    """Get the flag associated with a transaction."""
-
     return (
         db.query(Flag)
         .filter(Flag.txn_id == txn_id)
@@ -204,79 +226,103 @@ def get_flag_by_transaction(db: Session, txn_id: str):
 
 def get_all_flags(
     db: Session,
-    risk_level: Optional[str] = None,
-    rule: Optional[str] = None,
-    status: Optional[str] = None,
+    risk_level: str = None,
+    rule: str = None,
+    status: str = None,
+    limit: int = 1000,
 ):
-    """Return flags with optional filters, highest risk first."""
-
     query = db.query(Flag)
 
-    if risk_level is not None:
-        if risk_level not in ALLOWED_RISK_LEVELS:
-            raise ValueError("Invalid risk level")
+    if risk_level:
+        query = query.filter(
+            Flag.risk_level == risk_level
+        )
 
-        query = query.filter(Flag.risk_level == risk_level)
+    if status:
+        query = query.filter(
+            Flag.status == status
+        )
 
-    if status is not None:
-        if status not in ALLOWED_STATUSES:
-            raise ValueError("Invalid flag status")
+    if rule:
+        # SQLite JSON filtering
+        query = query.filter(
+            cast(
+                Flag.triggered_rules,
+                String,
+            ).contains(f'"{rule}"')
+        )
 
-        query = query.filter(Flag.status == status)
-
-    results = query.order_by(
-        Flag.risk_score.desc(),
-        Flag.id.asc(),
-    ).all()
-
-    # Filter JSON rule lists in Python for SQLite compatibility.
-    if rule is not None:
-        results = [
-            flag
-            for flag in results
-            if rule in (flag.triggered_rules or [])
-        ]
-
-    return results
-
-
-def get_flags(
-    db: Session,
-    risk_level: Optional[str] = None,
-    rule: Optional[str] = None,
-    status: Optional[str] = None,
-):
-    """Alias for get_all_flags."""
-
-    return get_all_flags(
-        db=db,
-        risk_level=risk_level,
-        rule=rule,
-        status=status,
-    )
-
-
-def get_flags_by_risk_level(db: Session, risk_level: str):
-    """Return flags matching a risk level."""
-
-    if risk_level not in ALLOWED_RISK_LEVELS:
-        raise ValueError("Invalid risk level")
-
+    # Highest risk first
     return (
-        db.query(Flag)
-        .filter(Flag.risk_level == risk_level)
-        .order_by(Flag.risk_score.desc(), Flag.id.asc())
+        query
+        .order_by(
+            Flag.risk_score.desc(),
+            Flag.id.desc(),
+        )
+        .limit(limit)
         .all()
     )
 
 
-def update_flag_status(db: Session, flag_id: int, status: str):
-    """Update the review status of a flag."""
+def get_flags(
+    db: Session,
+    risk_level: str = None,
+    rule: str = None,
+):
+    return get_all_flags(
+        db,
+        risk_level=risk_level,
+        rule=rule,
+    )
 
-    if status not in ALLOWED_STATUSES:
-        raise ValueError("Invalid flag status")
 
-    flag = db.get(Flag, flag_id)
+def get_flags_by_risk_level(
+    db: Session,
+    risk_level: str,
+):
+    return (
+        db.query(Flag)
+        .filter(Flag.risk_level == risk_level)
+        .order_by(
+            Flag.risk_score.desc(),
+            Flag.id.desc(),
+        )
+        .all()
+    )
+
+
+def get_total_flags(db: Session):
+    return db.query(Flag).count()
+
+
+def get_pending_flags(db: Session):
+    return (
+        db.query(Flag)
+        .filter(Flag.status == "Pending")
+        .order_by(
+            Flag.risk_score.desc(),
+            Flag.id.desc(),
+        )
+        .all()
+    )
+
+
+def update_flag_status(
+    db: Session,
+    flag_id: int,
+    status: str,
+):
+    allowed_statuses = {
+        "Pending",
+        "Fraud",
+        "Genuine",
+        "Escalate",
+    }
+
+    if status not in allowed_statuses:
+        raise ValueError("Invalid flag status.")
+
+    flag = get_flag(db, flag_id)
 
     if flag is None:
         return None
@@ -292,40 +338,50 @@ def update_flag_status(db: Session, flag_id: int, status: str):
         raise
 
 
-# --------------------------------------------------
-# ANALYST ACTION CRUD
-# --------------------------------------------------
+# ============================================================
+# ANALYST ACTIONS
+# ============================================================
 
 def create_analyst_action(
     db: Session,
     flag_id: int,
     action: str,
-    notes: Optional[str] = None,
+    notes: str = None,
 ):
-    """Record an analyst decision and update the flag status."""
+    """
+    Record an analyst decision and update the flag status
+    atomically.
+    """
 
-    if action not in ALLOWED_ACTIONS:
+    allowed_actions = {
+        "Fraud",
+        "Genuine",
+        "Escalate",
+    }
+
+    if action not in allowed_actions:
         raise ValueError(
-            "Invalid action. Use Fraud, Genuine, or Escalate."
+            "Action must be Fraud, Genuine, or Escalate."
         )
 
-    flag = db.get(Flag, flag_id)
+    flag = get_flag(db, flag_id)
 
     if flag is None:
-        raise ValueError("Flag does not exist")
+        raise ValueError("Flag does not exist.")
+
+    analyst_action = AnalystAction(
+        flag_id=flag_id,
+        action=action,
+        notes=notes,
+        timestamp=datetime.utcnow(),
+    )
 
     try:
-        analyst_action = AnalystAction(
-            flag_id=flag_id,
-            action=action,
-            notes=notes,
-            timestamp=datetime.utcnow(),
-        )
+        db.add(analyst_action)
 
-        # Keep the flag's current status synchronized with the decision.
+        # Update flag status in the same transaction
         flag.status = action
 
-        db.add(analyst_action)
         db.commit()
         db.refresh(analyst_action)
 
@@ -336,121 +392,117 @@ def create_analyst_action(
         raise
 
 
-def get_analyst_action(db: Session, action_id: int):
-    """Get an analyst action by its ID."""
+def get_analyst_action(
+    db: Session,
+    action_id: int,
+):
+    return (
+        db.query(AnalystAction)
+        .filter(AnalystAction.id == action_id)
+        .first()
+    )
 
-    return db.get(AnalystAction, action_id)
 
-
-def get_actions_by_flag(db: Session, flag_id: int):
-    """Return all analyst actions for a flag."""
-
+def get_actions_by_flag(
+    db: Session,
+    flag_id: int,
+):
     return (
         db.query(AnalystAction)
         .filter(AnalystAction.flag_id == flag_id)
-        .order_by(AnalystAction.timestamp.desc())
+        .order_by(
+            AnalystAction.timestamp.desc()
+        )
         .all()
     )
 
 
-def get_all_analyst_actions(db: Session):
-    """Return all analyst actions, newest first."""
-
+def get_all_analyst_actions(
+    db: Session,
+    limit: int = 1000,
+):
     return (
         db.query(AnalystAction)
-        .order_by(AnalystAction.timestamp.desc())
+        .order_by(
+            AnalystAction.timestamp.desc()
+        )
+        .limit(limit)
         .all()
     )
 
 
-# --------------------------------------------------
+# ============================================================
 # DASHBOARD SUMMARY
-# --------------------------------------------------
+# ============================================================
 
-def get_total_transactions(db: Session) -> int:
-    """Return the total number of transactions."""
+def get_summary_data(db: Session):
+    """Return database-backed metrics for the FraudLens dashboard."""
 
-    return db.query(Transaction).count()
-
-
-def get_total_flags(db: Session) -> int:
-    """Return the total number of fraud flags."""
-
-    return db.query(Flag).count()
-
-
-def get_pending_flags(db: Session) -> int:
-    """Return the number of flags awaiting review."""
-
-    return (
-        db.query(Flag)
-        .filter(Flag.status == "Pending")
-        .count()
-    )
-
-
-def get_summary_data(db: Session) -> dict:
-    """Return summary metrics for the FraudLens dashboard."""
-
-    transactions = get_total_transactions(db)
-    flags = get_total_flags(db)
-    pending = get_pending_flags(db)
-
-    all_flags = db.query(Flag).all()
+    total_transactions = get_total_transactions(db)
+    total_flagged = get_total_flags(db)
 
     risk_breakdown = {
-        "Low": 0,
-        "Medium": 0,
-        "High": 0,
+        level: (
+            db.query(Flag)
+            .filter(Flag.risk_level == level)
+            .count()
+        )
+        for level in (
+            "Low",
+            "Medium",
+            "High",
+        )
     }
 
+    # Count each triggered rule across all flags
     rule_breakdown = {}
 
-    for flag in all_flags:
-        if flag.risk_level in risk_breakdown:
-            risk_breakdown[flag.risk_level] += 1
+    flags = db.query(Flag).all()
 
-        for rule_name in (flag.triggered_rules or []):
-            rule_breakdown[rule_name] = (
-                rule_breakdown.get(rule_name, 0) + 1
+    for flag in flags:
+        for rule in flag.triggered_rules or []:
+            rule_breakdown[rule] = (
+                rule_breakdown.get(rule, 0) + 1
             )
 
-    # Aggregate risk scores by customer using flagged transactions.
-    customer_scores = {}
-
-    for flag in all_flags:
-        transaction = (
-            db.query(Transaction)
-            .filter(Transaction.txn_id == flag.txn_id)
-            .first()
+    # Top risky customers
+    top_risky_customers = (
+        db.query(
+            Transaction.customer_id,
+            func.count(Flag.id).label("flag_count"),
+            func.sum(Flag.risk_score).label(
+                "total_risk_score"
+            ),
         )
-
-        if transaction is None:
-            continue
-
-        customer_id = transaction.customer_id
-
-        customer_scores[customer_id] = (
-            customer_scores.get(customer_id, 0) + flag.risk_score
+        .join(
+            Flag,
+            Flag.txn_id == Transaction.txn_id,
         )
+        .group_by(
+            Transaction.customer_id
+        )
+        .order_by(
+            desc("total_risk_score")
+        )
+        .limit(5)
+        .all()
+    )
 
-    top_risky_customers = sorted(
-        [
-            {
-                "customer_id": customer_id,
-                "combined_risk_score": score,
-            }
-            for customer_id, score in customer_scores.items()
-        ],
-        key=lambda item: item["combined_risk_score"],
-        reverse=True,
-    )[:5]
+    top_risky_customers_data = [
+        {
+            "customer_id": row.customer_id,
+            "flag_count": row.flag_count,
+            "total_risk_score": (
+                row.total_risk_score or 0
+            ),
+        }
+        for row in top_risky_customers
+    ]
 
     return {
-        "total_transactions": transactions,
-        "total_flagged": flags,
-        "pending_flags": pending,
+        "total_transactions": total_transactions,
+        "total_flagged": total_flagged,
         "risk_breakdown": risk_breakdown,
         "rule_breakdown": rule_breakdown,
-        "top_risky_customers": top_risky_customers,
+        "top_risky_customers": top_risky_customers_data,
     }
