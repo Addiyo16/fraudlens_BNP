@@ -1,30 +1,131 @@
-import { useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import "./App.css";
-import { summaryData, flaggedTransactions } from "./mockData";
+import { flaggedTransactions } from "./mockData";
+
 
 function App() {
-  const [transactions, setTransactions] = useState(flaggedTransactions);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState("");
+  const fileInputRef = useRef(null);
+  const [transactions, setTransactions] = useState([]);
+  const [summary, setSummary] = useState(null);
   const [selectedTransaction, setSelectedTransaction] = useState(null);
   const [activePage, setActivePage] = useState("overview");
 
-  const handleAction = (action) => {
+  const API_URL = "http://127.0.0.1:8001";
+
+  const loadDashboardData = async () => {
+    try {
+      const [summaryResponse, flagsResponse] = await Promise.all([
+        fetch(`${API_URL}/summary`),
+        fetch(`${API_URL}/flags`),
+      ]);
+
+      if (!summaryResponse.ok || !flagsResponse.ok) {
+        throw new Error("Failed to load dashboard data");
+      }
+
+      const summaryData = await summaryResponse.json();
+      const flagsData = await flagsResponse.json();
+
+      const normalizedFlags = flagsData.map((flag) => ({
+        id: flag.id,
+        txnId: flag.txn_id,
+        customerId: flag.customer_id,
+        amount: flag.amount,
+        timestamp: flag.timestamp,
+        city: flag.city,
+        beneficiaryId: flag.beneficiary_id,
+        channel: flag.channel,
+        riskScore: flag.risk_score,
+        riskLevel: flag.risk_level,
+        triggeredRules: flag.triggered_rules,
+        explanation: flag.explanation,
+        status: flag.status,
+      }));
+
+      setSummary(summaryData);
+      setTransactions(normalizedFlags);
+    } catch (error) {
+      console.error("Failed to load dashboard data:", error);
+    }
+  };
+
+  useEffect(() => {
+    loadDashboardData();
+  }, []);
+
+  const handleAction = async (action) => {
     if (!selectedTransaction) return;
 
-    const updatedTransaction = {
-      ...selectedTransaction,
-      status: action,
-    };
+    try {
+      const response = await fetch(
+        `${API_URL}/flags/${selectedTransaction.id}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            action,
+            notes: "",
+          }),
+        }
+      );
 
-    setTransactions((currentTransactions) =>
-      currentTransactions.map((transaction) =>
-        transaction.id === selectedTransaction.id
-          ? updatedTransaction
-          : transaction
-      )
-    );
+      const data = await response.json();
 
-    setSelectedTransaction(updatedTransaction);
+      if (!response.ok) {
+        throw new Error(data.detail || "Failed to update transaction");
+      }
+
+      await loadDashboardData();
+
+      setSelectedTransaction((current) => ({
+        ...current,
+        status: action,
+      }));
+    } catch (error) {
+      console.error("Failed to update transaction:", error);
+      alert(error.message || "Failed to update transaction");
+    }
   };
+
+  const handleUpload = async (event) => {
+    const file = event.target.files?.[0];
+
+    if (!file) return;
+
+    setUploading(true);
+    setUploadMessage("");
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const response = await fetch("http://127.0.0.1:8001/upload", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || "Upload failed");
+        }
+
+        setUploadMessage(
+          `${data.uploaded_count} transactions processed • ${data.flagged_count} flagged`
+        );
+        await loadDashboardData();
+
+      } catch (error) {
+        setUploadMessage(error.message || "Upload failed");
+      } finally {
+        setUploading(false);
+        event.target.value = "";
+      }
+    };
 
   return (
     <div className="app">
@@ -90,33 +191,53 @@ function App() {
             <p>Monitor suspicious transactions and investigate risk signals.</p>
           </div>
 
-          <button className="upload-button">
-            + Upload CSV
-          </button>
+        <button
+          className="upload-button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+        >
+          {uploading ? "Uploading..." : "Upload CSV"}
+        </button>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".csv,text/csv"
+          onChange={handleUpload}
+          style={{ display: "none" }}
+        />
+
+        {uploadMessage && (
+          <div className="upload-message">
+            {uploadMessage}
+          </div>
+        )}
         </header>
 
         <section className="stats-grid">
           <div className="stat-card">
             <span className="stat-label">Total Transactions</span>
-            <strong>{summaryData.totalTransactions.toLocaleString()}</strong>
+            <strong>{(summary?.total_transactions ?? 0).toLocaleString()}</strong>
             <span className="stat-meta">Processed</span>
           </div>
 
           <div className="stat-card">
             <span className="stat-label">Flagged Transactions</span>
-            <strong>{summaryData.totalFlagged}</strong>
+            <strong>{summary?.total_flagged ?? 0}</strong>
             <span className="stat-meta">7.2% of total</span>
           </div>
 
           <div className="stat-card">
             <span className="stat-label">High Risk</span>
-            <strong>{summaryData.highRisk}</strong>
+            <strong>{summary?.risk_breakdown?.High ?? 0}</strong>
             <span className="stat-meta">Requires attention</span>
           </div>
 
           <div className="stat-card">
             <span className="stat-label">Pending Review</span>
-            <strong>{summaryData.pendingReview}</strong>
+            <strong>
+              {transactions.filter((transaction) => transaction.status === "Pending").length}
+            </strong>
             <span className="stat-meta">Analyst queue</span>
           </div>
         </section>
@@ -134,11 +255,15 @@ function App() {
               <div className="risk-row">
                 <div className="risk-info">
                   <span>High</span>
-                  <strong>{summaryData.riskDistribution.high}</strong>
+                  <strong>{summary?.risk_breakdown?.High ?? 0}</strong>
                 </div>
                 <div className="bar">
                   <div className="bar-fill high" style={{
-                                                          width: `${(summaryData.riskDistribution.high / summaryData.totalFlagged) * 100}%`,
+                                                          width: `${
+                                                            summary?.total_flagged
+                                                              ? ((summary?.risk_breakdown?.High ?? 0) / summary.total_flagged) * 100
+                                                              : 0
+                                                          }%`,
                                                         }} />
                 </div>
               </div>
@@ -146,11 +271,15 @@ function App() {
               <div className="risk-row">
                 <div className="risk-info">
                   <span>Medium</span>
-                  <strong>{summaryData.riskDistribution.medium}</strong>
+                  <strong>{summary?.risk_breakdown?.Medium ?? 0}</strong>
                 </div>
                 <div className="bar">
                   <div className="bar-fill medium" style={{
-  width: `${(summaryData.riskDistribution.medium / summaryData.totalFlagged) * 100}%`,
+  width: `${
+    summary?.total_flagged
+      ? ((summary?.risk_breakdown?.Medium ?? 0) / summary.total_flagged) * 100
+      : 0
+  }%`,
 }} />
                 </div>
               </div>
@@ -158,11 +287,15 @@ function App() {
               <div className="risk-row">
                 <div className="risk-info">
                   <span>Low</span>
-                  <strong>{summaryData.riskDistribution.low}</strong>
+                  <strong>{summary?.risk_breakdown?.Low ?? 0}</strong>
                 </div>
                 <div className="bar">
                   <div className="bar-fill low" style={{
-  width: `${(summaryData.riskDistribution.low / summaryData.totalFlagged) * 100}%`,
+  width: `${
+    summary?.total_flagged
+      ? ((summary?.risk_breakdown?.Low ?? 0) / summary.total_flagged) * 100
+      : 0
+  }%`,
 }} />
                 </div>
               </div>
@@ -181,25 +314,25 @@ function App() {
               <div className="rule">
                 <span className="rule-dot" />
                 <span>High Amount</span>
-                <strong>{summaryData.ruleBreakdown.HIGH_AMOUNT}</strong>
+                <strong>{summary?.rule_breakdown?.HIGH_AMOUNT ?? 0}</strong>
               </div>
 
               <div className="rule">
                 <span className="rule-dot" />
                 <span>Night Transaction</span>
-                <strong>{summaryData.ruleBreakdown.NIGHT_TRANSACTION}</strong>
+                <strong>{summary?.rule_breakdown?.NIGHT_TRANSACTION ?? 0}</strong>
               </div>
 
               <div className="rule">
                 <span className="rule-dot" />
                 <span>Rapid Fire</span>
-                <strong>{summaryData.ruleBreakdown.RAPID_FIRE}</strong>
+                <strong>{summary?.rule_breakdown?.RAPID_FIRE ?? 0}</strong>
               </div>
 
               <div className="rule">
                 <span className="rule-dot" />
                 <span>New Location</span>
-                <strong>{summaryData.ruleBreakdown.NEW_LOCATION}</strong>
+                <strong>{summary?.rule_breakdown?.NEW_LOCATION ?? 0}</strong>
               </div>
             </div>
           </div>
@@ -382,8 +515,12 @@ function App() {
               <p>Review and investigate flagged transactions.</p>
             </div>
 
-            <button className="upload-button">
-              + Upload CSV
+            <button
+              className="view-all"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+            >
+              {uploading ? "Uploading..." : "+ Upload CSV"}
             </button>
           </header>
 
@@ -568,25 +705,27 @@ function App() {
           <section className="stats-grid">
             <div className="stat-card">
               <span className="stat-label">Open Alerts</span>
-              <strong>{summaryData.pendingReview}</strong>
+              <strong>{summary?.total_flagged - transactions.filter(
+                                                  (transaction) => transaction.status === "Pending"
+                                                ).length}</strong>
               <span className="stat-meta">Awaiting review</span>
             </div>
 
             <div className="stat-card">
               <span className="stat-label">High Risk</span>
-              <strong>{summaryData.highRisk}</strong>
+              <strong>{summary?.risk_breakdown?.High ?? 0}</strong>
               <span className="stat-meta">Priority alerts</span>
             </div>
 
             <div className="stat-card">
               <span className="stat-label">Medium Risk</span>
-              <strong>{summaryData.riskDistribution.medium}</strong>
+              <strong>{summary?.risk_breakdown?.Medium ?? 0}</strong>
               <span className="stat-meta">Requires review</span>
             </div>
 
             <div className="stat-card">
               <span className="stat-label">Low Risk</span>
-              <strong>{summaryData.riskDistribution.low}</strong>
+              <strong>{summary?.risk_breakdown?.Low ?? 0}</strong>
               <span className="stat-meta">Lower priority</span>
             </div>
           </section>
@@ -613,7 +752,8 @@ function App() {
 
                 <tbody>
                   {[...transactions]
-                    .sort((a, b) => b.riskScore - a.riskScore)
+                      .filter((transaction) => transaction.status === "Pending")
+                      .sort((a, b) => b.riskScore - a.riskScore)
                     .map((transaction) => (
                       <tr
                         key={transaction.id}
